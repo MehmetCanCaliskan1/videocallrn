@@ -17,11 +17,12 @@ import {
     ClientRoleType,
     IRtcEngine,
     VideoSourceType,
-    RenderModeType
+    RenderModeType,
+    DataStreamConfig
 } from 'react-native-agora';
-
-const APP_ID = '26bc7e0971794a43bb50854e986ae4fd'; // Kendi App ID'nizi buraya koyun
-const TEMP_TOKEN = ''; // Token kullanıyorsanız buraya ekleyin, yoksa null/boş string
+import WaitingScreen from './WaitingScreen'; 
+const APP_ID = '26bc7e0971794a43bb50854e986ae4fd'; 
+const TEMP_TOKEN = ''; 
 
 export default function CallScreen({ route, navigation }: any) {
     const { channelName, isHost } = route.params;
@@ -29,6 +30,9 @@ export default function CallScreen({ route, navigation }: any) {
     const agoraEngineRef = useRef<IRtcEngine | null>(null);
     const [joined, setJoined] = useState(false);
     
+    const [isApproved, setIsApproved] = useState(isHost ? true : false); // Host ise onaylı başlar
+    const [dataStreamId, setDataStreamId] = useState<number | null>(null);
+
     // Bağlantı Durumları
     const [activeRemoteUid, setActiveRemoteUid] = useState<number | null>(null);
     const [incomingRequestUid, setIncomingRequestUid] = useState<number | null>(null);
@@ -44,7 +48,6 @@ export default function CallScreen({ route, navigation }: any) {
         };
     }, []);
 
-    // --- Başlatma ve İzinler ---
     const init = async () => {
         if (Platform.OS === 'android') {
             await requestAndroidPermissions();
@@ -70,73 +73,81 @@ export default function CallScreen({ route, navigation }: any) {
 
             engine.initialize({ appId: APP_ID });
 
-            // Host kontrol mekanizması için varsayılan olarak herkesi susturuyoruz
+            // Veri Akışı Oluştur
+            const config = new DataStreamConfig();
+            config.syncWithAudio = false;
+            config.ordered = true;
+            const streamId = engine.createDataStream(config);
+            setDataStreamId(streamId);
+
             engine.muteAllRemoteAudioStreams(true);
             engine.muteAllRemoteVideoStreams(true);
 
-            // --- Event Listenerlar ---
             
-            // 1. Yerel kullanıcı katıldı
             engine.addListener('onJoinChannelSuccess', (_connection, uid) => {
                 console.log('Local kullanıcı kanala girdi:', uid);
                 setJoined(true);
+
+    
+                if (!isHost) {
+                    engine.muteLocalAudioStream(true);
+                }
             });
 
-            // 2. Uzak kullanıcı katıldı
-engine.addListener('onUserJoined', (_connection, uid) => {
-    console.log("Remote kullanıcı geldi:", uid);
+            engine.addListener('onUserJoined', (_connection, uid) => {
+                console.log("Remote kullanıcı geldi:", uid);
 
-    if (isHost) {
-        setIncomingRequestUid(uid);
-        
-        // ÖNEMLİ: Popup'ta görebilmek için videoyu hemen açmamız lazım!
-        // Sesi kapalı tutabilirsin (false yaparsan sesini de duyarsın)
-        engine.muteRemoteVideoStream(uid, false); 
-        engine.muteRemoteAudioStream(uid, true); // İstersen sesi duymamak için true bırak
-    } else {
-        // Misafir ise... (eski mantık aynı)
-        setActiveRemoteUid(uid);
-        engine.muteRemoteVideoStream(uid, false);
-        engine.muteRemoteAudioStream(uid, false);
-    }
-});
-
-            // 3. Uzak kullanıcı çıktı
-     // ... setupAgora fonksiyonunun içi ...
-
-// 3. Uzak kullanıcı çıktı
-engine.addListener('onUserOffline', (_connection, uid) => {
-    console.log("Kullanıcı çıktı:", uid);
-
-    // EĞER MİSAFİRSEK: Host çıktığında biz de çıkalım
-    if (!isHost) {
-        Alert.alert("Görüşme Sona Erdi", "Host yayını sonlandırdı.", [
-            { 
-                text: "Tamam", 
-                onPress: () => {
-                    destroy();
-                    navigation.goBack(); 
+                if (isHost) {
+                    // Host: Gelen kişiyi istemci olarak gör
+                    setIncomingRequestUid(uid);
+                    
+                    engine.muteRemoteVideoStream(uid, false); 
+                    engine.muteRemoteAudioStream(uid, true); 
+                } else {
+                    // Misafir: Host'u gördüğünde
+                    setActiveRemoteUid(uid);
+                    engine.muteRemoteVideoStream(uid, false);
+                    engine.muteRemoteAudioStream(uid, false);
                 }
-            }
-        ]);
-        return; // Fonksiyonu burada kesiyoruz
-    }
+            });
 
-    // EĞER HOSTSAK: Misafir çıktığında sadece ekranı temizle (Host odada kalmaya devam edebilir veya istersen o da çıksın)
-    if (activeRemoteUid === uid) setActiveRemoteUid(null);
-    if (incomingRequestUid === uid) setIncomingRequestUid(null);
-    Alert.alert("Kullanıcı Ayrıldı", "Misafir " + uid + " ayrıldı.");
-});
+            engine.addListener('onUserOffline', (_connection, uid) => {
+                console.log("Kullanıcı çıktı:", uid);
 
-            // --- Ayarlar ---
+                if (!isHost) {
+                    Alert.alert("Görüşme Sona Erdi", "Host yayını sonlandırdı.", [
+                        { text: "Tamam", onPress: () => { leave(); } }
+                    ]);
+                    return; 
+                }
+
+                if (activeRemoteUid === uid) setActiveRemoteUid(null);
+                if (incomingRequestUid === uid) setIncomingRequestUid(null);
+                Alert.alert("Kullanıcı Ayrıldı", "Misafir " + uid + " ayrıldı.");
+            });
+
+            // --- YENİ: Onay Mesajını Dinle ---
+            engine.addListener('onStreamMessage', (_connection, uid, streamId, data) => {
+                const message = String.fromCharCode(...data);
+                console.log("Mesaj alındı:", message);
+
+                if (!isHost && message === "APPROVE_GUEST") {
+                    Alert.alert("Bağlandı", "Host katılımınızı onayladı.");
+                    setIsApproved(true);
+                    engine.muteLocalAudioStream(false);
+                }
+                if (!isHost && message === "REJECT_GUEST") {
+                    Alert.alert("Bağlantı Reddedildi", "Host katılımınızı reddetti.");
+                    setIsApproved(false);
+                    leave();
+                }
+            });
+
             engine.setChannelProfile(ChannelProfileType.ChannelProfileCommunication);
             engine.enableVideo();
             engine.startPreview();
-
-            // Hoparlörü zorla aç (Ahize yerine hoparlör kullanımı için)
             engine.setEnableSpeakerphone(true); 
 
-            // Kanala Katıl
             engine.joinChannel(TEMP_TOKEN, channelName, 0, {
                 clientRoleType: ClientRoleType.ClientRoleBroadcaster
             });
@@ -148,7 +159,6 @@ engine.addListener('onUserOffline', (_connection, uid) => {
     };
 
     const destroy = () => {
-        
         try {
             agoraEngineRef.current?.leaveChannel();
             agoraEngineRef.current?.removeAllListeners();
@@ -164,25 +174,40 @@ engine.addListener('onUserOffline', (_connection, uid) => {
         navigation.goBack();
     };
 
-    // --- Host Onay İşlemleri ---
+    // Host'un Onay/Red Fonksiyonları
     const handleApprove = () => {
         if (incomingRequestUid !== null && agoraEngineRef.current) {
-            // İzin verilen kullanıcının ses ve videosunu aç
+            // 1. Gelen kişinin ses ve videosunu aç
             agoraEngineRef.current.muteRemoteVideoStream(incomingRequestUid, false);
             agoraEngineRef.current.muteRemoteAudioStream(incomingRequestUid, false);
-
             setActiveRemoteUid(incomingRequestUid);
+
+            // 2. Misafire onay sinyali gönder
+            if (dataStreamId !== null) {
+                const message = "APPROVE_GUEST";
+                const data = new Uint8Array(message.length);
+                for (let i = 0; i < message.length; i++) {
+                    data[i] = message.charCodeAt(i);
+                }
+                agoraEngineRef.current.sendStreamMessage(dataStreamId, data, data.length);
+            }
+
             setIncomingRequestUid(null);
         }
     };
 
    const handleReject = () => {
-    setIncomingRequestUid(null);
-    agoraEngineRef.current?.leaveChannel();
-};
+        setIncomingRequestUid(null);
+        if (dataStreamId !== null && agoraEngineRef.current) {
+            const message = "REJECT_GUEST";
+            const data = new Uint8Array(message.length);
+            for (let i = 0; i < message.length; i++) {
+                data[i] = message.charCodeAt(i);
+            }
+            agoraEngineRef.current.sendStreamMessage(dataStreamId, data, data.length);
+        }
+    };
 
-
-    // --- Medya Kontrolleri ---
     const toggleMic = () => {
         if (agoraEngineRef.current) {
             agoraEngineRef.current.muteLocalAudioStream(!isMicMuted);
@@ -197,11 +222,18 @@ engine.addListener('onUserOffline', (_connection, uid) => {
         }
     };
 
+    // --- RENDER KISMI ---
+
+    // 1. Misafirsek ve Onaylanmadıysak -> BEKLEME EKRANI
+    if (!isHost && !isApproved) {
+        return <WaitingScreen onCancel={leave} />;
+    }
+
+    // 2. Normal Video Ekranı 
     return (
         <SafeAreaView style={styles.container}>
             <StatusBar barStyle="light-content" backgroundColor="#111" />
             
-            {/* --- Header --- */}
             <View style={styles.header}>
                 <Text style={styles.channelText}>Oda: {channelName}</Text>
                 <View style={styles.badge}>
@@ -230,13 +262,13 @@ engine.addListener('onUserOffline', (_connection, uid) => {
                     </View>
                 )}
 
-                {/* Yerel Kullanıcı (Ben) - Küçük Ekran */}
+                {/* Küçük Ekran */}
                 {joined && (
-                    <View style={styles.localVideoFloating}>
+                    <View style={styles.localVideoFloating} >
                         <RtcSurfaceView 
                             canvas={{ uid: 0, sourceType: VideoSourceType.VideoSourceCamera }} 
                             style={styles.fullScreen} 
-                            zOrderMediaOverlay={true} // Bu Android'de üstte kalmasını sağlar
+                            zOrderMediaOverlay={true} 
                         />
                         <View style={styles.localLabel}>
                             <Text style={styles.localLabelText}>Ben</Text>
@@ -244,60 +276,56 @@ engine.addListener('onUserOffline', (_connection, uid) => {
                     </View>
                 )}
 
-                {/* Host İçin Onay Popup'ı */}
-               {isHost && incomingRequestUid !== null && (
-    <View style={styles.popupOverlay}>
-        <View style={styles.popupBox}>
-            <Text style={styles.popupTitle}>Görüşme İsteği</Text>
-            
-            <View style={styles.popupVideoWrapper}>
-                <RtcSurfaceView
-                    canvas={{ uid: incomingRequestUid, renderMode: 1 }} // 1 = Hidden (Cover)
-                    style={styles.popupVideo}
-                    zOrderMediaOverlay={true} // Popup üstünde görünmesi için şart!
-                />
+                {/* Popup */}
+                {isHost && incomingRequestUid !== null && (
+                    <View style={styles.popupOverlay}>
+                        <View style={styles.popupBox}>
+                            <Text style={styles.popupTitle}>Görüşme İsteği</Text>
+                            
+                            <View style={styles.popupVideoWrapper}>
+                                <RtcSurfaceView
+                                    canvas={{ uid: incomingRequestUid, renderMode: 1 }} 
+                                    style={styles.popupVideo}
+                                    zOrderMediaOverlay={true} 
+                                />
+                            </View>
+
+                            <Text style={styles.popupDesc}>
+                                Bir kullanıcı bağlanmak istiyor.
+                            </Text>
+                            
+                            <View style={styles.popupButtons}>
+                                <TouchableOpacity onPress={handleReject} style={[styles.btn, styles.btnReject]}>
+                                    <Text style={[styles.btnText, {color: '#d32f2f'}]}>Reddet</Text>
+                                </TouchableOpacity>
+
+                                <TouchableOpacity onPress={handleApprove} style={[styles.btn, styles.btnApprove]}>
+                                    <Text style={styles.btnText}>Kabul Et</Text>
+                                </TouchableOpacity>
+                            </View>
+                        </View>
+                    </View>
+                )}
             </View>
 
-            <Text style={styles.popupDesc}>
-                Bir kullanıcı bağlanmak istiyor.
-            </Text>
-            
-            <View style={styles.popupButtons}>
-                <TouchableOpacity onPress={handleReject} style={[styles.btn, styles.btnReject]}>
-                    <Text style={[styles.btnText, {color: '#d32f2f'}]}>Reddet</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity onPress={handleApprove} style={[styles.btn, styles.btnApprove]}>
-                    <Text style={styles.btnText}>Kabul Et</Text>
-                </TouchableOpacity>
-            </View>
-        </View>
-    </View>
-)}
-            </View>
-
-            {/* --- Kontrol Paneli --- */}
+            {/* alt kısmım*/}
             <View style={styles.controls}>
-                
-               {/*  {/* Mikrofon */}
-               {/*  <TouchableOpacity onPress={toggleMic} style={[styles.controlBtn, isMicMuted && styles.controlBtnActive]}>
+                 <TouchableOpacity onPress={toggleMic} style={[styles.controlBtn, isMicMuted && styles.controlBtnActive]}>
                     <Text style={styles.controlIcon}>{isMicMuted ? '🔇' : '🎤'}</Text>
-                </TouchableOpacity> */}
+                </TouchableOpacity> 
+                
 
-                {/* Aramayı Bitir */}
                 <TouchableOpacity onPress={leave} style={styles.endCallBtn}>
                     <Text style={styles.endCallText}>Aramayı Bitir</Text>
                 </TouchableOpacity>
 
-                {/* Kamera Çevir */}
-              {/*   <TouchableOpacity onPress={switchCamera} style={styles.controlBtn}>
-                    <Text style={styles.controlIcon}>📷</Text>
+                <TouchableOpacity onPress={switchCamera} style={styles.controlBtn}>
+                    <Text style={styles.controlIcon}></Text>
                 </TouchableOpacity>
- */}
+                
             </View>
         </SafeAreaView>
     );
-    
 }
 
 const styles = StyleSheet.create({
@@ -324,10 +352,10 @@ const styles = StyleSheet.create({
     // Local Video (Küçük Pencere)
     localVideoFloating: {
         position: 'absolute',
-        bottom: 70,
+        top: 30,
         right: 5,
-        width: 150,
-        height: 250,
+        width: 120,
+        height: 200,
         borderRadius: 12,
         borderWidth: 1,
         borderColor: 'rgba(255,255,255,0.3)',
@@ -363,8 +391,6 @@ const styles = StyleSheet.create({
     btnApprove: { backgroundColor: '#00C851' },
     btnText: { color: 'white', fontWeight: '600', fontSize: 16 },
 
-    // Reject Text Color Adjustment
-    
     // Alt Kontroller
     controls: { 
         position: 'absolute', bottom: 40, left: 0, right: 0,
@@ -382,18 +408,17 @@ const styles = StyleSheet.create({
         shadowColor: '#FF4444', shadowOpacity: 0.4, shadowRadius: 10, elevation: 5
     },
     endCallText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
-    // ... diğer stiller
+    
     popupVideoWrapper: {
         width: '100%',
-        height: 200,          // Videonun yüksekliği
+        height: 200,          
         backgroundColor: '#000',
         borderRadius: 12,
-        overflow: 'hidden',   // Köşelerin yuvarlak kalması için
-        marginBottom: 15,     // Yazı ile arasına boşluk
+        overflow: 'hidden',   
+        marginBottom: 15,    
     },
     popupVideo: {
         width: '100%',
         height: '100%',
     },
-    // ...
 });

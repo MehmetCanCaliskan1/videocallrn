@@ -5,7 +5,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 // Sayfalarımızı import ediyoruz
 import HomeScreen from './src/screens/HomeScreen';
 import CallScreen from './src/screens/CallScreen';
-
+import WaitingScreen from './src/screens/WaitingScreen';
 const Stack = createNativeStackNavigator();
 
 export default function App() {
